@@ -398,10 +398,11 @@ public class HollowProducerConsumerTests {
         redeployedProducer.initializeDataModel(updatedSchema);
         redeployedProducer.restore(v1, blobStore);
 
-        // if we leave v2Field1 = v1Field1, the test fails even sooner because the record is
+        // if we leave v2Field1 = v1Field1, the test fails at the blobStore assert because the record is
         // written to the same ordinal with only 1 field, resulting in no changes, and no delta
-        // causing the consumer.triggerRefreshTo(v2) to fail
-        int v2Field1 = 1;
+        // causing the consumer.triggerRefreshTo(v2) to fail.  If we change it, it will pass the blobStore
+        // assert and then fail reading field2
+        int v2Field1 = v1Field1; /* + 1; */
         int v2Field2 = 3;
         long v2 = redeployedProducer.runCycle(new Populator() {
             @Override
@@ -418,6 +419,9 @@ public class HollowProducerConsumerTests {
                 writeStateEngine.add("TestType", record);
             }
         });
+
+        Assert.assertNotNull(blobStore.retrieveDeltaBlob(v1));
+        Assert.assertEquals(v2, blobStore.retrieveDeltaBlob(v1).getToVersion());
 
         // trigger refresh and expect schema change
         consumer.triggerRefreshTo(v2);
