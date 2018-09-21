@@ -17,6 +17,15 @@
  */
 package com.netflix.hollow.api.consumer;
 
+import java.util.BitSet;
+import java.util.concurrent.Executor;
+
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Test;
+
+import com.netflix.hollow.api.objects.generic.GenericHollowObject;
+import com.netflix.hollow.api.objects.generic.GenericHollowRecordHelper;
 import com.netflix.hollow.api.producer.HollowProducer;
 import com.netflix.hollow.api.producer.HollowProducer.Populator;
 import com.netflix.hollow.api.producer.HollowProducer.ReadState;
@@ -25,13 +34,13 @@ import com.netflix.hollow.api.producer.HollowProducer.Validator.ValidationExcept
 import com.netflix.hollow.api.producer.HollowProducer.VersionMinter;
 import com.netflix.hollow.api.producer.HollowProducer.WriteState;
 import com.netflix.hollow.api.producer.fs.HollowInMemoryBlobStager;
+import com.netflix.hollow.core.read.engine.PopulatedOrdinalListener;
 import com.netflix.hollow.core.read.engine.object.HollowObjectTypeReadState;
+import com.netflix.hollow.core.schema.HollowObjectSchema;
+import com.netflix.hollow.core.schema.HollowObjectSchema.FieldType;
+import com.netflix.hollow.core.write.HollowObjectWriteRecord;
+import com.netflix.hollow.core.write.HollowWriteStateEngine;
 import com.netflix.hollow.tools.compact.HollowCompactor.CompactionConfig;
-import java.util.BitSet;
-import java.util.concurrent.Executor;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
 
 public class HollowProducerConsumerTests {
     
@@ -334,6 +343,97 @@ public class HollowProducerConsumerTests {
         
         for(int i=10000;i<20000;i++)
             Assert.assertTrue(foundValues.get(i));
+    }
+
+    @Test
+    public void producerRestoresWithUpdatedSchema() {
+        String type = "TestType";
+        HollowObjectSchema schema = new HollowObjectSchema(type, 1);
+        schema.addField("field1", FieldType.INT);
+
+        // setup a producer with our initial schema and write a record
+        HollowProducer producer = HollowProducer.withPublisher(blobStore)
+                                                .withBlobStager(new HollowInMemoryBlobStager())
+                                                .build();
+
+        producer.initializeDataModel(schema);
+        int v1Field1 = 1;
+        long v1 = producer.runCycle(new Populator() {
+            @Override
+            public void populate(WriteState newState) throws Exception {
+                HollowWriteStateEngine writeStateEngine = newState.getObjectMapper().getStateEngine();
+                HollowObjectWriteRecord record = new HollowObjectWriteRecord(schema);
+                record.setInt("field1", v1Field1);
+
+                writeStateEngine.add(type, record);
+            }
+        });
+
+        // initialize our consumer to see the state with 1 field
+        HollowConsumer consumer = HollowConsumer.withBlobRetriever(blobStore).build();
+        consumer.triggerRefreshTo(v1);
+        int ordinal1 = consumer.getStateEngine()
+                               .getTypeState(type)
+                               .getListener(PopulatedOrdinalListener.class)
+                               .getPopulatedOrdinals()
+                               .nextSetBit(0);
+
+        GenericHollowObject record = (GenericHollowObject) GenericHollowRecordHelper.instantiate(
+            consumer.getStateEngine().getTypeDataAccess(type).getDataAccess(),
+            type,
+            ordinal1);
+
+        Assert.assertEquals(1, record.getInt("field1"));
+
+        // restore our new producer with the updated schema
+        HollowObjectSchema updatedSchema = new HollowObjectSchema(type, 2);
+        updatedSchema.addField("field1", FieldType.INT);
+        updatedSchema.addField("field2", FieldType.INT);
+
+        HollowProducer redeployedProducer = HollowProducer.withPublisher(blobStore)
+                                                          .withBlobStager(new HollowInMemoryBlobStager())
+                                                          .build();
+
+
+        redeployedProducer.initializeDataModel(updatedSchema);
+        redeployedProducer.restore(v1, blobStore);
+
+        // if we leave v2Field1 = v1Field1, the test fails even sooner because the record is
+        // written to the same ordinal with only 1 field, resulting in no changes, and no delta
+        // causing the consumer.triggerRefreshTo(v2) to fail
+        int v2Field1 = 1;
+        int v2Field2 = 3;
+        long v2 = redeployedProducer.runCycle(new Populator() {
+            @Override
+            public void populate(WriteState newState) throws Exception {
+                // verify that our schema is what we expect
+                Assert.assertEquals(2, ((HollowObjectSchema) newState.getStateEngine().getSchema(type)).numFields());
+
+                // write a new record for our updated schema
+                HollowWriteStateEngine writeStateEngine = newState.getObjectMapper().getStateEngine();
+                HollowObjectWriteRecord record = new HollowObjectWriteRecord(updatedSchema);
+                record.setInt("field1", v2Field1);
+                record.setInt("field2", v2Field2);
+
+                writeStateEngine.add("TestType", record);
+            }
+        });
+
+        // trigger refresh and expect schema change
+        consumer.triggerRefreshTo(v2);
+        int ordinal2 = consumer.getStateEngine()
+            .getTypeState(type)
+            .getListener(PopulatedOrdinalListener.class)
+            .getPopulatedOrdinals()
+            .nextSetBit(0);
+
+        GenericHollowObject updatedRecord = (GenericHollowObject) GenericHollowRecordHelper.instantiate(
+            consumer.getStateEngine().getTypeDataAccess(type).getDataAccess(),
+            type,
+            ordinal2);
+
+        Assert.assertEquals(v2Field1, updatedRecord.getInt("field1"));
+        Assert.assertEquals(v2Field2, updatedRecord.getInt("field2"));
     }
     
     private long runCycle(HollowProducer producer, final int cycleNumber) {
