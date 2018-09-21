@@ -426,10 +426,10 @@ public class HollowProducerConsumerTests {
         // trigger refresh and expect schema change
         consumer.triggerRefreshTo(v2);
         int ordinal2 = consumer.getStateEngine()
-            .getTypeState(type)
-            .getListener(PopulatedOrdinalListener.class)
-            .getPopulatedOrdinals()
-            .nextSetBit(0);
+                               .getTypeState(type)
+                               .getListener(PopulatedOrdinalListener.class)
+                               .getPopulatedOrdinals()
+                               .nextSetBit(0);
 
         GenericHollowObject updatedRecord = (GenericHollowObject) GenericHollowRecordHelper.instantiate(
             consumer.getStateEngine().getTypeDataAccess(type).getDataAccess(),
